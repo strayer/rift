@@ -654,9 +654,18 @@ impl VirtualWorkspaceManager {
     }
 
     pub fn remove_window(&mut self, window_id: WindowId) {
-        if let Some(assignment) = self.window_registry.get_mut().remove_window_assignment(window_id)
-        {
+        let assignment = self.window_registry.get_mut().remove_window_assignment(window_id);
+        if let Some(assignment) = assignment {
             if let Some(workspace) = self.workspaces.get_mut(assignment.workspace_id) {
+                workspace.remove_window(window_id);
+            }
+        } else {
+            // Defense-in-depth: the registry mapping may already have been cleared by a
+            // direct WindowRegistry::remove_window (the registry and the per-workspace sets
+            // are distinct stores). Without this scrub the window would be stranded in its
+            // workspace set and a later discovery would add it to a second workspace,
+            // producing duplicate membership. Scrub any residual set membership.
+            for (_id, workspace) in self.workspaces.iter_mut() {
                 workspace.remove_window(window_id);
             }
         }
