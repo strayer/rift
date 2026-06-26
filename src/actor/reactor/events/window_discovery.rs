@@ -25,6 +25,8 @@ impl WindowDiscoveryHandler {
             .window_manager
             .window(wid)
             .is_some_and(|window| window.info.is_minimized);
+        let was_manageable =
+            reactor.window_manager.window(wid).is_some_and(|window| window.is_manageable);
 
         if let Some(existing) = reactor.window_manager.window_mut(wid) {
             existing.info.title = info.title.clone();
@@ -70,6 +72,18 @@ impl WindowDiscoveryHandler {
                 is_minimized = info.is_minimized,
                 "Window minimize state reconciled from discovery"
             );
+        }
+
+        // (a) loginwindow/non-standard fix: if a window that was being managed is no longer
+        // manageable (e.g. a lock-screen window whose subrole resolved to AXUnknown after it
+        // was inserted during wake churn), evict it from the layout immediately rather than
+        // leaving it as a phantom tile. The reconciliation sweep is the backstop for nodes
+        // that leaked onto inactive workspaces; this handles the active case promptly.
+        let now_manageable =
+            reactor.window_manager.window(wid).is_some_and(|window| window.is_manageable);
+        if was_manageable && !now_manageable {
+            debug!(?wid, "Window became unmanageable; removing from layout");
+            reactor.send_layout_event(crate::actor::reactor::LayoutEvent::WindowRemoved(wid));
         }
     }
 
