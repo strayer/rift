@@ -1586,7 +1586,20 @@ impl State {
             }
         }
 
+        // A window missing from kAXWindowsAttribute is NOT necessarily gone. During
+        // wake/unlock the attribute is transiently empty or space-filtered, so blindly
+        // trusting it tears down still-alive windows and drops their virtual-workspace
+        // assignment (which later gets re-dumped onto the active workspace). Confirm each
+        // candidate is actually invalid — the same signal the Err branch above relies on —
+        // before removing it.
         for wid in stale_wids {
+            let still_alive = self.windows.get(&wid).is_some_and(|window| {
+                !matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement)))
+            });
+            if still_alive {
+                trace!(?wid, "Skipping stale removal; window still valid (likely wake churn)");
+                continue;
+            }
             self.remove_tracked_window(wid, "Removed stale window (not in current list)");
         }
     }
