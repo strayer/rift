@@ -998,6 +998,50 @@ impl LayoutEngine {
         }
     }
 
+    /// Every window currently referenced by any workspace's active layout tree, across all
+    /// spaces. Used by the reactor's reconciliation sweep to find phantom tree nodes (windows
+    /// that linger in a tree after their real window is gone — e.g. lock-screen windows that
+    /// were inserted during wake churn and never removed from an inactive workspace).
+    pub fn all_tiled_windows(&self) -> Vec<WindowId> {
+        let mut seen: HashSet<WindowId> = HashSet::default();
+        let mut out = Vec::new();
+        let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
+        for ws_id in ws_ids {
+            let Some(space) =
+                self.virtual_workspace_manager.workspaces.get(ws_id).map(|ws| ws.space)
+            else {
+                continue;
+            };
+            if let Some(layout) = self.workspace_layouts.active(space, ws_id) {
+                for wid in self.workspace_tree(ws_id).visible_windows_in_layout(layout) {
+                    if seen.insert(wid) {
+                        out.push(wid);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Remove the given windows from every layout tree and workspace set, then rebalance.
+    /// Returns whether anything was removed. Used by the reconciliation sweep.
+    pub fn prune_tiled_windows(&mut self, wids: &[WindowId]) -> bool {
+        if wids.is_empty() {
+            return false;
+        }
+        for &wid in wids {
+            self.remove_window_from_all_tiling_trees(wid);
+            self.virtual_workspace_manager.remove_window(wid);
+            self.floating.remove_floating(wid);
+            self.window_layout_constraints.remove(&wid);
+            if self.focused_window == Some(wid) {
+                self.focused_window = None;
+            }
+        }
+        self.rebalance_all_layouts();
+        true
+    }
+
     fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
         for space in self.workspace_layouts.spaces() {
             if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {

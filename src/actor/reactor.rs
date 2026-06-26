@@ -1697,6 +1697,76 @@ impl Reactor {
             .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
     }
 
+    /// Reconciliation sweep: realign the layout trees to ground truth (the window server).
+    /// Any window referenced by a tree that no longer exists is pruned:
+    ///   1. Orphans — a tree references a WindowId the registry no longer tracks (no
+    ///      WindowState), e.g. a lock-screen window whose node leaked from an inactive
+    ///      workspace during wake churn. Always safe to remove.
+    ///   2. Dead windows — a still-tracked, non-minimized window whose window-server id is
+    ///      no longer present. The window server is authoritative (the same source change #2
+    ///      trusts when suppressing AX destroys), so absence means the window is gone.
+    ///
+    /// One safety valve: if we ask the server about windows and it reports NONE of them as
+    /// live, treat that as a transient query failure (not a mass close) and skip server-based
+    /// pruning for this pass — orphans are still cleaned. This avoids a degenerate
+    /// "server hiccup wipes every window" outcome without per-window heuristics.
+    pub(crate) fn reconcile_phantom_windows(&mut self) {
+        // Don't reconcile before we have a stable display set (startup / mid-transition):
+        // the layout state itself is being (re)built then.
+        if self.space_state.screens.is_empty() {
+            return;
+        }
+        let tiled = self.layout_manager.layout_engine.all_tiled_windows();
+        if tiled.is_empty() {
+            return;
+        }
+
+        // Single batched window-server query for the tracked candidates.
+        let sys_ids: Vec<_> = tiled
+            .iter()
+            .filter_map(|&wid| self.window_manager.window(wid).and_then(|s| s.info.sys_id))
+            .collect();
+        let live: HashSet<crate::sys::window_server::WindowServerId> =
+            crate::sys::window_server::get_windows(&sys_ids).into_iter().map(|i| i.id).collect();
+        let trust_server = !sys_ids.is_empty() && !live.is_empty();
+
+        let mut dead = Vec::new();
+        for &wid in &tiled {
+            match self.window_manager.window(wid) {
+                None => dead.push(wid),
+                Some(state) => {
+                    if state.info.is_minimized {
+                        continue;
+                    }
+                    let Some(wsid) = state.info.sys_id else {
+                        continue;
+                    };
+                    if trust_server && !live.contains(&wsid) {
+                        dead.push(wid);
+                    }
+                }
+            }
+        }
+
+        if dead.is_empty() {
+            return;
+        }
+
+        debug!(count = dead.len(), ?dead, "Reconcile: pruning phantom/dead tiled windows");
+        for &wid in &dead {
+            let wsid = self.window_manager.window(wid).and_then(|s| s.info.sys_id);
+            if let Some(wsid) = wsid {
+                self.transaction_manager.remove_for_window(wsid);
+                self.window_manager.remove_window_server_state(wsid);
+            }
+            self.window_manager.remove_window(wid);
+        }
+        if self.layout_manager.layout_engine.prune_tiled_windows(&dead) {
+            let _ = self.update_layout_or_warn(false, false);
+            self.maybe_send_menu_update();
+        }
+    }
+
     pub(crate) fn visible_spaces_for_layout(
         &self,
         include_inactive: bool,

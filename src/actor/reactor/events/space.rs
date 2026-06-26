@@ -135,6 +135,10 @@ impl SpaceEventHandler {
                 "Layout update failed after topology change",
             );
         }
+
+        // Reconciliation sweep: clean up phantom tree nodes (e.g. lock-screen windows that
+        // leaked into a workspace tree during wake churn) and dead-process ghosts.
+        reactor.reconcile_phantom_windows();
     }
 
     // spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
