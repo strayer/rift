@@ -80,18 +80,24 @@ impl WindowEventHandler {
             None => return false,
         };
 
-        // Suppress false-positive destructions when on a fullscreen space or during MC.
-        // kAXMainWindowChangedNotification triggers remove_stale_windows in app.rs, which
-        // calls kAXWindowsAttribute (space-filtered), omitting Desktop windows and emitting
-        // WindowDestroyed for them. get_window() uses CGWindowListCopyWindowInfo
-        // (not space-filtered), so Some here means the window still exists.
-        if !reactor.has_user_space_context() || reactor.is_mission_control_active() {
-            if let Some(ws_id) = window_server_id {
-                if crate::sys::window_server::get_window(ws_id)
-                    .is_some_and(|ws_info| ws_info.pid == wid.pid)
-                {
-                    return false;
-                }
+        // Suppress false-positive destructions. A WindowDestroyed can arrive for a window
+        // that still exists: during wake/space churn AX is space-filtered and transiently
+        // drops windows (kAXMainWindowChanged -> remove_stale_windows), and AX can even emit
+        // a spurious kAXUIElementDestroyed. get_window() uses CGWindowListCopyWindowInfo
+        // (NOT space-filtered), so Some with a matching pid means the window is still alive.
+        // Tearing it down here drops its virtual-workspace assignment and re-dumps it onto
+        // the active workspace after wake, so always verify against the window server first
+        // — not only during fullscreen/MC (the previous gate let the wake case through,
+        // since command_space had already settled to a normal user space by then).
+        if let Some(ws_id) = window_server_id {
+            if crate::sys::window_server::get_window(ws_id)
+                .is_some_and(|ws_info| ws_info.pid == wid.pid)
+            {
+                trace!(
+                    ?wid,
+                    "Suppressing WindowDestroyed; window still present in window server"
+                );
+                return false;
             }
         }
 
