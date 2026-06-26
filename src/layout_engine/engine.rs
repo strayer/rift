@@ -1362,6 +1362,9 @@ impl LayoutEngine {
                         self.workspace_tree_mut(ws_id).rebalance(layout);
                     }
                 }
+                // WSDUP instrumentation: catch duplicate workspace membership introduced
+                // by a discovery cycle for this pid.
+                self.virtual_workspace_manager.audit_membership("WindowsOnScreenUpdated");
             }
             LayoutEvent::AppClosed(pid) => {
                 for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {

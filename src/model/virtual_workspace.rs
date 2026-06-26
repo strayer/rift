@@ -589,6 +589,23 @@ impl VirtualWorkspaceManager {
 
             let existing_mapping = self.window_registry.get().workspace_info_for_window(window_id);
 
+            // WSDUP instrumentation: snapshot which workspace sets already contain this
+            // window before the removal below (which only targets the registry's workspace).
+            let containing_before: Vec<(VirtualWorkspaceId, SpaceId)> = self
+                .workspaces
+                .iter()
+                .filter(|(_, ws)| ws.contains_window(window_id))
+                .map(|(id, ws)| (id, ws.space))
+                .collect();
+            let registry_ws = existing_mapping.map(|m| m.workspace_id);
+            let desync = containing_before.iter().any(|(id, _)| Some(*id) != registry_ws);
+            if desync || containing_before.len() > 1 {
+                warn!(
+                    "WSDUP pre-assign desync: window_id={:?} space={:?} target_ws={:?} registry={:?} sets_contain={:?}",
+                    window_id, space, workspace_id, existing_mapping, containing_before
+                );
+            }
+
             if let Some(WindowWorkspaceInfo {
                 space: existing_space,
                 workspace_id: old_workspace_id,
@@ -605,7 +622,7 @@ impl VirtualWorkspaceManager {
                 }
             }
 
-            if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
+            let assigned = if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
                 workspace.add_window(window_id);
                 self.window_registry.get_mut().assign_window_to_workspace(
                     window_id,
@@ -618,7 +635,26 @@ impl VirtualWorkspaceManager {
                     workspace_id
                 );
                 false
+            };
+
+            // WSDUP instrumentation: after the assignment the window must live in exactly
+            // one workspace set; otherwise we just created/left a duplicate membership.
+            if assigned {
+                let containing_after: Vec<(VirtualWorkspaceId, SpaceId)> = self
+                    .workspaces
+                    .iter()
+                    .filter(|(_, ws)| ws.contains_window(window_id))
+                    .map(|(id, ws)| (id, ws.space))
+                    .collect();
+                if containing_after.len() > 1 {
+                    error!(
+                        "WSDUP post-assign DUPLICATE: window_id={:?} target_ws={:?} now in sets={:?} (registry_before={:?}, sets_before={:?})",
+                        window_id, workspace_id, containing_after, existing_mapping, containing_before
+                    );
+                }
             }
+
+            assigned
         })
     }
 
@@ -628,6 +664,31 @@ impl VirtualWorkspaceManager {
         window_id: WindowId,
     ) -> Option<VirtualWorkspaceId> {
         self.window_registry.get().workspace_for_window(space, window_id)
+    }
+
+    /// WSDUP instrumentation: scan every workspace set for windows that are members of more
+    /// than one workspace, logging them with the registry's recorded assignment. `context`
+    /// identifies the call site (e.g. the event being handled).
+    pub fn audit_membership(&self, context: &str) {
+        let mut seen: HashMap<WindowId, Vec<(VirtualWorkspaceId, SpaceId)>> = HashMap::default();
+        for (ws_id, ws) in self.workspaces.iter() {
+            for wid in ws.windows() {
+                seen.entry(wid).or_default().push((ws_id, ws.space));
+            }
+        }
+        for (wid, locations) in &seen {
+            if locations.len() > 1 {
+                let registry = self.window_registry.get().workspace_info_for_window(*wid);
+                error!(
+                    "WSDUP audit[{}]: wid={:?} is in {} workspaces {:?}; registry={:?}",
+                    context,
+                    wid,
+                    locations.len(),
+                    locations,
+                    registry
+                );
+            }
+        }
     }
 
     pub fn workspace_for_window_any(&self, window_id: WindowId) -> Option<VirtualWorkspaceId> {

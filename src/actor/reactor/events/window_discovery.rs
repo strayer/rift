@@ -95,6 +95,16 @@ impl WindowDiscoveryHandler {
 
         match (assigned_workspace, active_workspace) {
             (Some(assigned), Some(active)) => assigned == active,
+            (None, active) => {
+                // WSDUP: a window with no workspace assignment is emitted to the active space
+                // and auto-assigned to the *active* workspace — how a window that belonged to
+                // another workspace gets dumped onto the current one after sleep/wake churn.
+                warn!(
+                    "WSDUP emit-no-assignment: wid={:?} space={:?} active_ws={:?}; emitting to active (dump candidate)",
+                    wid, space, active
+                );
+                true
+            }
             _ => true,
         }
     }

@@ -2,6 +2,7 @@ use std::ptr::NonNull;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
@@ -306,6 +307,17 @@ impl WindowRegistry {
     }
 
     pub fn remove_window(&mut self, window_id: WindowId) {
+        // WSDUP teardown probe: clearing a window record here drops its virtual-workspace
+        // assignment WITHOUT removing it from the VWM workspace set. If this fires for a
+        // still-alive window during wake, it is the placement-loss source.
+        if let Some(ws) = self.windows.get(&window_id).and_then(|record| record.workspace) {
+            warn!(
+                "WSDUP teardown: WindowRegistry::remove_window dropping assignment {:?} for {:?}\n{}",
+                ws,
+                window_id,
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         self.windows.remove(&window_id);
         let server_ids: Vec<_> = self
             .window_servers

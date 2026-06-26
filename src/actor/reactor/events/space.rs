@@ -136,6 +136,14 @@ impl SpaceEventHandler {
             );
         }
 
+        // WSDUP instrumentation: scan for windows that ended up in more than one workspace
+        // after a space-state change (pins the event that introduced corruption).
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .audit_membership("SpaceStateChanged");
+
         // Reconciliation sweep: clean up phantom tree nodes (e.g. lock-screen windows that
         // leaked into a workspace tree during wake churn) and dead-process ghosts.
         reactor.reconcile_phantom_windows();
