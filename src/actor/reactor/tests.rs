@@ -5722,3 +5722,88 @@ fn native_space_resolution_policy_table() {
         assert_eq!(resolved, expected, "resolver case: {case}");
     }
 }
+
+#[test]
+fn phantom_ax_destroy_while_session_inactive_preserves_workspace_assignment() {
+    // pid 1234 matches the test stub in window_server::get_windows, which reports
+    // every queried window as alive and owned by pid 1234. This models the unlock
+    // repro: the app's AX element is transiently invalid (AXError -25202 during
+    // lock-screen display churn) while the window server still lists the window.
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    reactor.handle_events(apps.make_app(1234, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1234, 1);
+    let workspaces: Vec<_> = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(workspaces.len() >= 2, "need a non-default workspace");
+    let target_workspace = workspaces[1];
+    assert!(reactor.layout_manager.layout_engine.virtual_workspace_manager_mut().assign_window_to_workspace(
+        &mut reactor.state.windows,
+        space,
+        wid,
+        target_workspace
+    ));
+
+    // Screen locks; AX notifications are unreliable until the session is active again.
+    reactor.handle_event(Event::SessionDidResignActive);
+    reactor.handle_event(Event::WindowDestroyed(wid));
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(&reactor.state.windows, space, wid),
+        Some(target_workspace),
+        "a phantom AX destroy during an inactive session must not drop the window's workspace assignment"
+    );
+}
+
+#[test]
+fn real_destroy_while_session_inactive_still_removes_window() {
+    // pid != 1234: the window server stub reports owner pid 1234, so the owner
+    // check fails and the window counts as genuinely gone even while the
+    // session-inactive quarantine is active.
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    reactor.handle_event(Event::SessionDidResignActive);
+    reactor.handle_event(Event::WindowDestroyed(wid));
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(&reactor.state.windows, space, wid),
+        None,
+        "a real destroy must still tear down state during an inactive session"
+    );
+}
